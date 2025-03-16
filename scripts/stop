@@ -1,0 +1,165 @@
+#!/bin/bash
+
+# Ignore hangup signals so the script continues running after disconnecting
+trap '' SIGHUP
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly PROJECT_ROOT
+readonly VAR_DIR="${PROJECT_ROOT}/var"
+readonly PID_DIR="${VAR_DIR}/pid"
+readonly LOG_DIR="${VAR_DIR}/log"
+
+# Color definitions
+readonly RED='\033[0;31m'
+readonly BLUE='\033[0;34m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m'
+
+# log_file will be set in main() after config validation
+log_file=""
+
+function get_timestamp() {
+    date "+%Y-%m-%d %H:%M:%S.%N"
+}
+
+function log_message() {
+    local level=$1
+    local message=$2
+    local timestamp
+    timestamp=$(get_timestamp)
+    echo "${timestamp} | ${level} | ${message}" >>"$log_file"
+}
+
+function error_exit() {
+    local message=$1
+    echo -e "${RED}${BOLD}ERROR:${NC} $message" >&2
+    log_message "ERRO" "$message"
+    exit 1
+}
+
+function info() {
+    local message=$1
+    echo -e "${BLUE}${BOLD}INFO:${NC} $message"
+    log_message "INFO" "$message"
+}
+
+function print_usage() {
+    echo "Trading System Shutdown Script"
+    echo
+    echo "This script gracefully stops the trading system instance running with specified configuration."
+    echo
+    echo "Usage:"
+    echo "  $0 <config.json>    Stop trading system with config file"
+    echo "  $0 -h, --help       Show this help message"
+    echo
+    echo "Args:"
+    echo "  config.json         Path to the configuration file (JSON format)"
+    echo
+    echo "Examples:"
+    echo "  $0 config.json          Stop instance with config.json"
+    echo "  $0 configs/prod.json    Stop instance with prod config"
+    echo
+    echo "Notes:"
+    echo "  - Attempts graceful shutdown for up to 30 seconds"
+    echo "  - Force kills the process if graceful shutdown fails"
+    echo "  - Logs are written to var/log directory"
+    echo "  - Safe to run even if no instance is running"
+    exit 1
+}
+
+function check_config() {
+    [[ -f "$1" ]] || error_exit "Config file $1 does not exist"
+    [[ "$1" == *.json ]] || error_exit "Config file must be a JSON file"
+    # Convert config path to absolute path
+    echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+}
+
+function get_pid_file() {
+    local config_name
+    config_name=$(basename "$1" .json)
+    echo "${PID_DIR}/${config_name}.pid"
+}
+
+function get_log_file() {
+    local config_name
+    config_name=$(basename "$1" .json)
+
+    # Create config-specific log directory
+    local config_log_dir="${LOG_DIR}/${config_name}"
+    mkdir -p "${config_log_dir}"
+
+    # Generate timestamp with milliseconds
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
+    local milliseconds
+    milliseconds=$(date +"%N" | cut -c1-3) # Get nanoseconds and take first 3 digits for milliseconds
+
+    # Create log filename with timestamp, action, and config name
+    echo "${config_log_dir}/${timestamp}_${milliseconds}_stop_${config_name}.log"
+}
+
+function wait_for_stop() {
+    local pid=$1
+    local config_file=$2
+    local waited=0
+    local timeout=30
+
+    info "Sending stop signal to trading system..."
+    kill -TERM "$pid"
+
+    info "Waiting for trading system to shut down gracefully..."
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$timeout" ]; then
+            info "Trading system did not stop after ${timeout}s, force killing..."
+            kill -9 "$pid"
+            sleep 1
+            return
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+
+function stop_trading() {
+    local config_file="$1"
+    local pid_file
+    pid_file=$(get_pid_file "$config_file")
+
+    if [[ ! -f "$pid_file" ]]; then
+        info "No trading system running with config: $config_file"
+        exit 0
+    fi
+
+    local pid
+    pid=$(cat "$pid_file")
+    if kill -0 "$pid" 2>/dev/null; then
+        info "Stopping trading system (PID: $pid)"
+        wait_for_stop "$pid" "$config_file"
+        rm -f "$pid_file"
+        info "Trading system stopped successfully"
+    else
+        info "Trading system not running (stale PID file removed)"
+        rm -f "$pid_file"
+    fi
+}
+
+function main() {
+    [[ $# -eq 1 ]] || print_usage
+
+    case "$1" in
+    -h | --help)
+        print_usage
+        ;;
+    esac
+
+    local config_file="$1"
+    config_file=$(check_config "$config_file")
+    log_file=$(get_log_file "$config_file")
+    readonly log_file
+
+    stop_trading "$config_file"
+}
+
+main "$@"

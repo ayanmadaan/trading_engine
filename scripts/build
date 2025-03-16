@@ -1,0 +1,83 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly PROJECT_ROOT
+readonly BUILD_DIR="${PROJECT_ROOT}/build"
+
+BUILD_MODE="Release"
+
+# Color definitions
+readonly RED='\033[0;31m'
+readonly BLUE='\033[0;34m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m' # No Color
+
+function error_exit() {
+    echo -e "${RED}${BOLD}ERROR:${NC} $1" >&2
+    exit 1
+}
+
+function info() {
+    echo -e "${BLUE}${BOLD}INFO:${NC} $1"
+}
+
+function print_usage() {
+    echo "Usage: $0 [--debug|--release]"
+    echo "Options:"
+    echo "  --debug         Build in debug mode"
+    echo "  --release       Build in release mode (default)"
+    exit 1
+}
+
+function ensure_build_dir() {
+    [[ -d "$BUILD_DIR" ]] || error_exit "Build directory ${BUILD_DIR} does not exist"
+}
+
+function parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        --debug)
+            BUILD_MODE="Debug"
+            shift
+            ;;
+        --release)
+            BUILD_MODE="Release"
+            shift
+            ;;
+        -h | --help)
+            print_usage
+            ;;
+        *)
+            error_exit "Unknown option: $1"
+            ;;
+        esac
+    done
+}
+
+function run_cmake() {
+    info "Running CMAKE in ${BUILD_MODE} mode..."
+    cmake -DCMAKE_BUILD_TYPE="${BUILD_MODE}" .. || error_exit "CMAKE configuration failed"
+}
+
+function run_make() {
+    info "Running make..."
+    make || error_exit "Make failed"
+}
+
+function main() {
+    parse_args "$@"
+    ensure_build_dir
+
+    info "Build mode: ${BUILD_MODE}"
+
+    cd "${BUILD_DIR}" || error_exit "Failed to change to build directory"
+    run_cmake
+    run_make
+    info "Build completed successfully in ${BUILD_MODE} mode"
+}
+
+main "$@"

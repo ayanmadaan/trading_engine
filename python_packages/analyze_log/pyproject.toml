@@ -1,0 +1,13 @@
+# analyze_log/pyproject.toml
+[tool.poetry]
+name = "analyze-log"
+version = "0.1.0"
+description = "Trading log analyzer"
+authors = ["jack <jack@windfall.capital>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+rich = "^13.0.0"
+
+[tool.poetry.scripts]
+analyze-log = "analyze_log.cli:main"

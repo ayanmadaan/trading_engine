@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# ------------------------------ Global Variables ---------------------------- #
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(realpath "${SCRIPT_DIR}/..")"
+readonly PROJECT_ROOT
+readonly SOURCE_DIR="${PROJECT_ROOT}/build"
+readonly SOURCE_FILE="${SOURCE_DIR}/TradingSystem"
+DEPLOY_NAME="trading_program_$(date +%Y%m%d_%H%M%S)"
+readonly DEPLOY_NAME
+
+source "${SCRIPT_DIR}/common.sh"
+
+# ------------------------------- CLI Functions ------------------------------ #
+
+function print_usage() {
+    local -r SCRIPT_NAME=$(basename "${BASH_SOURCE[0]}")
+
+    echo "Trading Program Deployment Script"
+    echo
+    echo "This script deploys the trading program to the target server with version control."
+    echo "The deployment creates a timestamped version and updates a 'current' symlink."
+    echo
+    echo "Deployment Structure:"
+    echo "  deploy_root/"
+    echo "  └── trading/"
+    echo "      └── trading_program/"
+    echo "          ├── current -> history/trading_program_YYYYMMDD_HHMMSS"
+    echo "          └── history/"
+    echo "              └── trading_program_YYYYMMDD_HHMMSS/"
+    echo
+    echo "Usage:"
+    echo "  ${SCRIPT_NAME} [options] <target_machine>"
+    echo
+    echo "Args:"
+    echo "  target_machine    SSH target (e.g., user@hostname or SSH alias)"
+    echo
+    echo "Options:"
+    echo "  --deploy-root    Deployment root directory (default: \$HOME)"
+    echo "  -h, --help       Show this help message"
+    echo
+    echo "Examples:"
+    echo "  ${SCRIPT_NAME} deploy@trading-prod"
+    echo "  ${SCRIPT_NAME} --deploy-root '/deploy_root' user@hostname"
+    echo "  ${SCRIPT_NAME} --deploy-root '\$HOME/deploy' trading-stage"
+}
+
+function parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -h | --help)
+            print_usage
+            exit 0
+            ;;
+        --deploy-root)
+            local deploy_root=$2
+            eval "function get_deploy_root() {
+                echo '${deploy_root}'
+            }"
+            readonly -f get_deploy_root
+            shift 2
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            local production_machine=$1
+            eval "function get_production_machine() {
+                echo '${production_machine}'
+            }"
+            readonly -f get_production_machine
+            shift
+            ;;
+        esac
+    done
+
+    validate_arguments
+}
+
+function validate_arguments() {
+    if ! declare -F get_production_machine >/dev/null; then
+        echo "Error: Missing required argument: production_machine"
+        exit 1
+    fi
+
+    if [[ -z "$(get_production_machine)" ]]; then
+        echo "Error: Invalid production_machine: cannot be empty"
+        exit 1
+    fi
+}
+
+# ------------------------------ Deployment Functions ------------------------- #
+
+function setup_deploy_environment() {
+    local -r trading_program_dir="$(get_remote_deploy_root)/trading/trading_program"
+    info "Creating remote directory structure..."
+    ssh "$(get_production_machine)" 'mkdir --parents '"${trading_program_dir}" || {
+        error_exit "Failed to create remote directory"
+    }
+    ssh "$(get_production_machine)" 'mkdir --parents '"${trading_program_dir}"'/history' || {
+        error_exit "Failed to create remote directory"
+    }
+}
+
+function deploy_program() {
+    local -r trading_program_dir="$(get_remote_deploy_root)/trading/trading_program"
+    info "Deploying program to ${trading_program_dir}/history/${DEPLOY_NAME}..."
+    scp "${SOURCE_FILE}" "$(get_production_machine):${trading_program_dir}/history/${DEPLOY_NAME}" || error_exit "Failed to copy program files"
+}
+
+function update_symlink() {
+    local -r trading_program_dir="$(get_remote_deploy_root)/trading/trading_program"
+
+    local latest_trading_program
+    latest_trading_program="${trading_program_dir}/history/${DEPLOY_NAME}"
+    readonly latest_trading_program
+
+    local symlink_path
+    symlink_path="${trading_program_dir}/current"
+    readonly symlink_path
+
+    ssh "$(get_production_machine)" 'ln -sfn '"${latest_trading_program}"' '"${symlink_path}"'' || error_exit "Failed to update symlink"
+}
+
+function print_deployment_info() {
+    local -r trading_program_dir="$(get_remote_deploy_root)/trading/trading_program"
+    info "Deployment completed successfully"
+    info "Deployed to: ${trading_program_dir}/history/${DEPLOY_NAME}"
+    info "Updated symlink: ${trading_program_dir}/current -> history/${DEPLOY_NAME}"
+}
+
+function main() {
+    parse_arguments "$@"
+    setup_deploy_environment
+    deploy_program
+    update_symlink
+    print_deployment_info
+}
+
+main "$@"

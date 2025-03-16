@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# This script builds the hedge-group-analysis package using Poetry and then upgrades the global installation using pipx.
+# Usage: ./install.sh
+
+set -e # Exit immediately if a command exits with a non-zero status
+
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Change to the script directory
+cd "$SCRIPT_DIR"
+
+echo "🔨 Building package using Poetry..."
+poetry build
+
+# Get the version from pyproject.toml
+version=$(poetry version --short)
+echo "📦 Package version: $version"
+
+echo "🚀 Installing package with pipx..."
+pipx install "${SCRIPT_DIR}/dist/hedge_group_analysis-${version}-py3-none-any.whl" --force
+
+echo "✅ Installation completed successfully."
+echo "You can now use 'hedge-group-analysis' command from anywhere."
+echo "Try: hedge-group-analysis --help"
