@@ -1,0 +1,263 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly PROJECT_ROOT
+readonly VAR_DIR="${PROJECT_ROOT}/var"
+readonly PID_DIR="${VAR_DIR}/pid"
+readonly LOG_DIR="${VAR_DIR}/log"
+readonly CACHED_CONFIG_DIR="${VAR_DIR}/configs"
+
+readonly RED='\033[0;31m'
+readonly BLUE='\033[0;34m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m'
+
+# log_file will be set in main() after config validation
+log_file=""
+
+function get_timestamp() {
+    date "+%Y-%m-%d %H:%M:%S.%N"
+}
+
+function log_message() {
+    local -r level="$1"
+    local -r message="$2"
+    echo "$(get_timestamp) | ${level} | ${message}" >>"${log_file}"
+}
+
+function info() {
+    local message=$1
+    echo -e "${BLUE}${BOLD}INFO:${NC} ${message}"
+    log_message "INFO" "$message"
+}
+
+function error_exit() {
+    local message=$1
+    echo -e "${RED}${BOLD}ERROR:${NC} $message" >&2
+    log_message "ERRO" "$message"
+    exit 1
+}
+
+function print_usage() {
+    echo "Trading System Startup Script"
+    echo
+    echo "This script starts the trading system in background mode with specified configuration."
+    echo
+    echo "Usage:"
+    echo "  ${0} <config.json>    Start trading system with config file"
+    echo "  ${0} -h, --help       Show this help message"
+    echo
+    echo "Args:"
+    echo "  config.json    Path to the configuration file (JSON format)"
+    echo
+    echo "Examples:"
+    echo "  ${0} config.json          Start with config.json"
+    echo "  ${0} configs/prod.json    Start with prod config"
+    echo
+    echo "Notes:"
+    echo "  - The trading system runs in background mode"
+    echo "  - Logs are written to var/log directory"
+    echo "  - Only one instance per config file is allowed"
+    echo "  - Use stop script to gracefully shutdown the system"
+    exit 1
+}
+
+function check_config() {
+    local -r config_file="$1"
+    [[ -f "${config_file}" ]] || error_exit "Config file ${config_file} does not exist"
+    [[ "${config_file}" == *.json ]] || error_exit "Config file must be a JSON file"
+    # Convert config path to absolute path
+    echo "$(cd "$(dirname "${config_file}")" && pwd)/$(basename "${config_file}")"
+}
+
+function get_cached_strategy_config_path() {
+    local strategy_config_path="$1"
+    local strategy_config_path_name
+    strategy_config_path_name=$(basename "$strategy_config_path")
+    echo "${CACHED_CONFIG_DIR}/${strategy_config_path_name}"
+}
+
+function ensure_var_dirs() {
+    [[ -d "$VAR_DIR" ]] || mkdir --parents "$VAR_DIR"
+    [[ -d "$PID_DIR" ]] || mkdir --parents "$PID_DIR"
+    [[ -d "$LOG_DIR" ]] || mkdir --parents "$LOG_DIR"
+    [[ -d "$CACHED_CONFIG_DIR" ]] || mkdir --parents "$CACHED_CONFIG_DIR"
+}
+
+function get_pid_file() {
+    local config_name
+    config_name=$(basename "$1" .json)
+    echo "${PID_DIR}/${config_name}.pid"
+}
+
+function get_log_file() {
+    local config_name
+    config_name=$(basename "$1" .json)
+
+    # Create config-specific log directory
+    local config_log_dir="${LOG_DIR}/${config_name}"
+    mkdir -p "${config_log_dir}"
+
+    # Generate timestamp with milliseconds
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
+    local milliseconds
+    milliseconds=$(date +"%N" | cut -c1-3) # Get nanoseconds and take first 3 digits for milliseconds
+
+    # Create log filename with timestamp, action, and config name
+    echo "${config_log_dir}/${timestamp}_${milliseconds}_start_${config_name}.log"
+}
+
+function is_running() {
+    local pid_file="$1"
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0 # Process is running
+        else
+            rm -f "$pid_file" # Clean up stale pid file
+        fi
+    fi
+    return 1 # Process is not running
+}
+
+function capture_output() {
+    while IFS= read -r line; do
+        log_message "SOUT" "$line"
+        echo "$line"
+    done
+}
+
+function get_strategy_config_path() {
+    local -r infra_config_path="$1"
+
+    # Check if jq is installed
+    if ! command -v jq &>/dev/null; then
+        error_exit "Error: jq is not installed. Please install it first." >&2
+    fi
+
+    # Check if file exists
+    if [[ ! -f "$infra_config_path" ]]; then
+        error_exit "Error: File $infra_config_path does not exist." >&2
+    fi
+
+    # Extract the strategy_config_path using jq
+    local strategy_config_path
+    strategy_config_path=$(jq -r ".strategy_config_path" "$infra_config_path")
+    readonly strategy_config_path
+
+    # Check if the field exists and is not null
+    if [[ "$strategy_config_path" == "null" ]]; then
+        error_exit "Error: strategy_config_path not found in JSON." >&2
+    fi
+
+    # Return the extracted path
+    echo "$strategy_config_path"
+}
+
+function cache_strategy_config() {
+    local -r strategy_config_path="$1"
+    local cached_strategy_config_path
+    cached_strategy_config_path=$(get_cached_strategy_config_path "${strategy_config_path}")
+    readonly cached_strategy_config_path
+
+    cp "${strategy_config_path}" "${cached_strategy_config_path}"
+    info "Config file cached to: ${cached_strategy_config_path}"
+}
+
+function get_trading_program_path() {
+    local -r local_trading_program_path="${PROJECT_ROOT}/TradingSystem"
+    local -r remote_trading_program_path="${PROJECT_ROOT}/trading_program/current"
+
+    if [[ -x "${local_trading_program_path}" ]]; then
+        echo "${local_trading_program_path}"
+    elif [[ -x "${remote_trading_program_path}" ]]; then
+        echo "${remote_trading_program_path}"
+    else
+        error_exit "Trading program executable not found in paths:
+    ${local_trading_program_path}
+    ${remote_trading_program_path}"
+    fi
+}
+
+function start_trading() {
+    local -r config_file="$1"
+    local pid_file
+    pid_file=$(get_pid_file "${config_file}")
+    readonly pid_file
+
+    if is_running "$pid_file"; then
+        info "Trading system already running with config: ${config_file}"
+        exit 0
+    fi
+
+    info "Starting trading system with config: ${config_file}"
+
+    local strategy_config_path
+    strategy_config_path=$(get_strategy_config_path "${config_file}")
+    readonly strategy_config_path
+
+    local cached_strategy_config_path
+    cached_strategy_config_path=$(get_cached_strategy_config_path "${strategy_config_path}")
+    readonly cached_strategy_config_path
+
+    # Check if the cached config file exists and is different from the current config file
+    if [[ -f "${cached_strategy_config_path}" ]]; then
+        local delta_output
+        delta_output=$(delta --side-by-side --width=$(tput cols) "${cached_strategy_config_path}" "${strategy_config_path}" 2>&1) || {
+            info "Config file has changed. Here are the differences:"
+            echo "${delta_output}"
+            read -r -n 1 -p "Do you want to start with the new config? (y/n): " confirm
+            echo # Add a newline after the character is read
+            [[ "${confirm}" == "y" ]] || {
+                info "Abort starting trading system!"
+                exit 1
+            }
+        }
+    fi
+
+    # Cache the strategy config file
+    cache_strategy_config "${strategy_config_path}"
+
+    # Start process with nohup to ignore hangup signals,
+    # and redirect output through capture_output and error handler.
+    nohup "$(get_trading_program_path)" "${config_file}" 2> >(while read -r line; do
+        log_message "SERR" "${line}"
+        echo "${line}" >&2
+    done) \
+    1> >(capture_output) &
+
+    # Capture the PID of the trading system process
+    local pid
+    pid=$(jobs -p | head -n1)
+    readonly pid
+
+    echo "${pid}" >"${pid_file}"
+
+    info "Trading system started (PID: ${pid})"
+    info "Logs are being written to: ${log_file}"
+}
+
+function main() {
+    [[ $# -eq 1 ]] || print_usage
+
+    case "$1" in
+    -h | --help)
+        print_usage
+        ;;
+    esac
+
+    local -r infra_config_path="$1"
+    ensure_var_dirs
+
+    absolute_infra_config_path=$(check_config "${infra_config_path}")
+    log_file=$(get_log_file "${absolute_infra_config_path}")
+    readonly log_file
+
+    start_trading "${absolute_infra_config_path}"
+}
+
+main "$@"

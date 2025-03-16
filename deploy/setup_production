@@ -1,0 +1,421 @@
+#!/bin/bash
+
+# ------------------------------ Global Variables ---------------------------- #
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(realpath "${SCRIPT_DIR}/..")"
+readonly PROJECT_ROOT
+
+source "${SCRIPT_DIR}/common.sh"
+
+# ------------------------------- CLI Functions ------------------------------ #
+
+function print_usage() {
+    local -r SCRIPT_NAME=$(basename "${BASH_SOURCE[0]}")
+
+    echo "Production Server Setup Script"
+    echo
+    echo "This script sets up the production server environment."
+    echo
+    echo "Usage:"
+    echo "  ${SCRIPT_NAME} [options] <production_machine>"
+    echo
+    echo "Args:"
+    echo "  production_machine    SSH target (e.g., user@hostname or SSH alias)"
+    echo
+    echo "Options:"
+    echo "  --deploy-root    Deployment root directory (default: home directory)"
+    echo "  -h, --help       Show this help message"
+    echo
+    echo "Examples:"
+    echo "  ${SCRIPT_NAME} user@hostname"
+    echo "  ${SCRIPT_NAME} --deploy-root '~/foo' user@hostname"
+    echo "  ${SCRIPT_NAME} --deploy-root '\$HOME/foo' user@hostname"
+}
+
+function validate_arguments() {
+    if ! declare -F get_production_machine >/dev/null; then
+        error_exit "Missing required argument: production_machine"
+    fi
+
+    if [[ -z "$(get_production_machine)" ]]; then
+        error_exit "Invalid production_machine: cannot be empty"
+    fi
+}
+
+function parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -h | --help)
+            print_usage
+            exit 0
+            ;;
+        --deploy-root)
+            local -r deploy_root=$2
+            eval "function get_deploy_root() {
+                echo '${deploy_root}'
+            }"
+            readonly -f get_deploy_root
+            shift 2
+            ;;
+        -*)
+            error_exit "Unknown option: $1"
+            ;;
+        *)
+            local -r production_machine=$1
+            shift
+            # Define the function in global scope
+            eval "function get_production_machine() {
+                echo '${production_machine}'
+            }"
+            readonly -f get_production_machine
+            ;;
+        esac
+    done
+    readonly -f get_deploy_root
+
+    validate_arguments
+}
+
+# ---------------------------- Install Linux Tools --------------------------- #
+
+function setup_local_bin_path() {
+    info "Setting up local bin path on $(get_production_machine)..."
+
+    ssh "$(get_production_machine)" "
+        if ! grep -q 'PATH=\"\$HOME/.local/bin:\$PATH\"' \$HOME/.profile; then
+            echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> \$HOME/.profile &&
+            . \$HOME/.profile
+        fi
+    " || error_exit "Failed to set up local bin path on $(get_production_machine)"
+
+    info "Local bin path set up successfully"
+}
+
+function install_poetry_remote() {
+    info "Checking if Poetry is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" ". \$HOME/.profile && command -v poetry" &>/dev/null; then
+        info "Poetry not found on $(get_production_machine). Installing poetry..."
+        ssh "$(get_production_machine)" "
+            curl -sSL https://install.python-poetry.org | python3 - &&
+            . \$HOME/.profile
+        " || error_exit "Failed to install Poetry on $(get_production_machine)"
+
+        # Verify installation
+        if ! ssh "$(get_production_machine)" ". \$HOME/.profile && command -v poetry && poetry --version" &>/dev/null; then
+            error_exit "Poetry installation verified but command not accessible on $(get_production_machine)"
+        fi
+
+        info "Poetry installed successfully on $(get_production_machine)"
+    else
+        info "Poetry is already installed on $(get_production_machine)"
+    fi
+}
+
+function install_delta_remote() {
+    info "Checking if delta is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" ". \$HOME/.cargo/env && command -v delta" &>/dev/null; then
+        info "Delta not found on $(get_production_machine). Installing delta..."
+
+        # Check if Rust/Cargo is installed
+        if ! ssh "$(get_production_machine)" ". \$HOME/.cargo/env && command -v cargo" &>/dev/null; then
+            info "Installing Rust and Cargo first..."
+            ssh "$(get_production_machine)" "
+                curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+                . \"\$HOME/.cargo/env\"
+            " || error_exit "Failed to install Rust/Cargo on $(get_production_machine)"
+        fi
+
+        # Install delta using cargo
+        info "Installing delta using Cargo..."
+        ssh "$(get_production_machine)" "
+            . \"\$HOME/.cargo/env\" &&
+            cargo install git-delta
+        " || error_exit "Failed to install delta on $(get_production_machine)"
+
+        info "Delta installed successfully on $(get_production_machine)"
+    else
+        info "Delta is already installed on $(get_production_machine)"
+    fi
+}
+
+function install_fzf_remote() {
+    info "Checking if fzf is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" "test -f \$HOME/.fzf/bin/fzf" &>/dev/null; then
+        info "fzf not found on $(get_production_machine). Installing fzf..."
+
+        # Clone fzf repository and run install script
+        ssh "$(get_production_machine)" "
+            rm -rf \$HOME/.fzf &&
+            git clone --depth 1 https://github.com/junegunn/fzf.git \$HOME/.fzf &&
+            \$HOME/.fzf/install --all
+        " || error_exit "Failed to install fzf on $(get_production_machine)"
+
+        # Verify installation using direct path
+        if ! ssh "$(get_production_machine)" "\$HOME/.fzf/bin/fzf --version" &>/dev/null; then
+            error_exit "fzf installation failed on $(get_production_machine)"
+        fi
+
+        info "fzf installed successfully on $(get_production_machine)"
+    else
+        info "fzf is already installed on $(get_production_machine)"
+    fi
+}
+
+function install_tree_remote() {
+    info "Checking if tree is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" "command -v tree" &>/dev/null; then
+        info "tree not found on $(get_production_machine). Installing tree..."
+
+        # Install tree using apt-get or yum
+        ssh "$(get_production_machine)" "
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -qq && sudo apt-get install -y tree
+            elif command -v yum &>/dev/null; then
+                sudo yum install -y tree
+            else
+                echo 'Unsupported package manager'
+                exit 1
+            fi
+        " || error_exit "Failed to install tree on $(get_production_machine)"
+
+        info "tree installed successfully on $(get_production_machine)"
+    else
+        info "tree is already installed on $(get_production_machine)"
+    fi
+}
+
+function install_pipx_remote() {
+    info "Checking if pipx is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" "command -v pipx" &>/dev/null; then
+        info "pipx not found on $(get_production_machine). Installing pipx..."
+
+        # Install pipx using apt-get or pip
+        ssh "$(get_production_machine)" "
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -qq && sudo apt-get install -y python3-pip python3-venv pipx &&
+                pipx ensurepath
+            else
+                python3 -m pip install --user pipx &&
+                python3 -m pipx ensurepath
+            fi
+        " || error_exit "Failed to install pipx on $(get_production_machine)"
+
+        info "pipx installed successfully on $(get_production_machine)"
+    else
+        info "pipx is already installed on $(get_production_machine)"
+    fi
+}
+
+function install_lnav_remote() {
+    info "Checking if lnav is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" "command -v lnav" &>/dev/null; then
+        info "lnav not found on $(get_production_machine). Installing lnav..."
+
+        # Install lnav using apt-get or yum
+        ssh "$(get_production_machine)" "
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -qq && sudo apt-get install -y lnav
+            elif command -v yum &>/dev/null; then
+                sudo yum install -y lnav
+            else
+                echo 'Unsupported package manager'
+                exit 1
+            fi
+        " || error_exit "Failed to install lnav on $(get_production_machine)"
+
+        info "lnav installed successfully on $(get_production_machine)"
+    else
+        info "lnav is already installed on $(get_production_machine)"
+    fi
+}
+
+function install_gdb_remote() {
+    info "Checking if gdb is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" "command -v gdb" &>/dev/null; then
+        info "gdb not found on $(get_production_machine). Installing gdb..."
+
+        # Install gdb using apt-get or yum
+        ssh "$(get_production_machine)" "
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -qq && sudo apt-get install -y gdb
+            elif command -v yum &>/dev/null; then
+                sudo yum install -y gdb
+            else
+                echo 'Unsupported package manager'
+                exit 1
+            fi
+        " || error_exit "Failed to install gdb on $(get_production_machine)"
+
+        info "gdb installed successfully on $(get_production_machine)"
+    else
+        info "gdb is already installed on $(get_production_machine)"
+    fi
+}
+
+function install_zsh_remote() {
+    info "Checking if zsh is installed on $(get_production_machine)..."
+
+    if ! ssh "$(get_production_machine)" "command -v zsh" &>/dev/null; then
+        info "zsh not found on $(get_production_machine). Installing zsh..."
+
+        # Install zsh using apt-get or yum
+        ssh "$(get_production_machine)" "
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -qq && sudo apt-get install -y zsh
+            elif command -v yum &>/dev/null; then
+                sudo yum install -y zsh
+            else
+                echo 'Unsupported package manager'
+                exit 1
+            fi
+        " || error_exit "Failed to install zsh on $(get_production_machine)"
+
+        info "zsh installed successfully on $(get_production_machine)"
+    else
+        info "zsh is already installed on $(get_production_machine)"
+    fi
+}
+
+# ----------------------------- Setup Directory Structure --------------------- #
+
+function setup_zsh_environment() {
+    info "Setting up Zsh environment on $(get_production_machine)..."
+
+    # Install Oh My Zsh
+    ssh "$(get_production_machine)" "
+        if [ ! -d \"\$HOME/.oh-my-zsh\" ]; then
+            curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | sh
+        fi
+    " || error_exit "Failed to install Oh My Zsh"
+
+    # Install Powerlevel10k theme
+    ssh "$(get_production_machine)" "
+        if [ ! -d \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k\" ]; then
+            git clone --depth=1 https://github.com/romkatv/powerlevel10k.git \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k\"
+        fi
+    " || error_exit "Failed to install Powerlevel10k theme"
+
+    # Install required plugins
+    ssh "$(get_production_machine)" "
+        # Install zsh-autosuggestions
+        if [ ! -d \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions\" ]; then
+            git clone https://github.com/zsh-users/zsh-autosuggestions \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions\"
+        fi
+
+        # Install zsh-syntax-highlighting
+        if [ ! -d \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting\" ]; then
+            git clone https://github.com/zsh-users/zsh-syntax-highlighting.git \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting\"
+        fi
+
+        # Install zsh-completions
+        if [ ! -d \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-completions\" ]; then
+            git clone https://github.com/zsh-users/zsh-completions \"\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-completions\"
+        fi
+    " || error_exit "Failed to install Zsh plugins"
+
+    info "Zsh environment setup completed successfully"
+}
+
+function setup_directory_structure() {
+    info "Setting up directory structure on $(get_production_machine)..."
+    ssh "$(get_production_machine)" 'mkdir --parents '"$(get_remote_deploy_root)"'/trading/configs' ||
+        error_exit "Failed to create directory structure on $(get_production_machine)"
+    info "Directory structure created successfully"
+}
+
+function deploy_trading_utils() {
+    info "Deploying trading utils to $(get_production_machine)..."
+
+    # Ensure local trading_utils directory exists
+    local -r utils_dir="${SCRIPT_DIR}/trading_utils"
+    if [[ ! -d "${utils_dir}" ]]; then
+        error_exit "Trading utils directory not found: ${utils_dir}"
+    fi
+
+    # Create remote directory if it doesn't exist
+    ssh "$(get_production_machine)" "mkdir --parents $(get_remote_deploy_root)/trading/trading_utils" || error_exit "Failed to create remote directory"
+
+    # Use rsync with specific options:
+    # -a: archive mode (preserves permissions, timestamps, etc.)
+    # -v: verbose
+    # -z: compress during transfer
+    # -L: transform symlinks into referent files/dirs
+    # --delete: delete extraneous files from dest dirs
+    rsync -avzL --delete "${utils_dir}/" "$(get_production_machine):$(get_remote_deploy_root)/trading/trading_utils/" ||
+        error_exit "Failed to sync trading utils to $(get_production_machine)"
+
+    info "Trading utils deployed successfully"
+}
+
+# -------------------------- Deploy Python Packages -------------------------- #
+
+function build_and_deploy_packages() {
+    local -r local_python_packages_dir="$(realpath "${PROJECT_ROOT}/python_packages")"
+    local -r remote_python_packages_dir="$(get_remote_deploy_root)/trading/python_packages"
+    info "Building and deploying Python packages..."
+
+    ssh "$(get_production_machine)" 'mkdir --parents '"'""${remote_python_packages_dir}""'"'' ||
+        error_exit "Failed to create remote directory for Python packages"
+
+    while IFS= read -r -d '' package_dir; do
+        package_name=$(basename "${package_dir}")
+
+        info "Installing package ${package_name}..."
+
+        # Build the package locally
+        "${package_dir}/install" </dev/null || error_exit "Failed to install package ${package_name}"
+
+        # Locate the wheel file
+        wheel_file=$(find "${package_dir}/dist" -name "*.whl" -type f)
+        if [[ -z "${wheel_file}" ]]; then
+            error_exit "No wheel file found in ${package_name}/dist"
+        fi
+        wheel_filename=$(basename "${wheel_file}")
+
+        # Sync the wheel file to the remote server
+        rsync -avz "${wheel_file}" "$(get_production_machine):${remote_python_packages_dir}/" ||
+            error_exit "Failed to sync wheel file for ${package_name}"
+
+        # Install the package on the remote server
+        ssh -n "$(get_production_machine)" "bash -l -c 'pipx install --force \"${remote_python_packages_dir}/${wheel_filename}\"'" ||
+            error_exit "Failed to install package ${package_name} on remote"
+
+        # info "Package ${package_name} installed successfully"
+    done < <(find "${local_python_packages_dir}" -mindepth 1 -maxdepth 1 -type d -print0)
+
+    info "Python packages deployed successfully"
+}
+
+# ------------------------------- Main Function ------------------------------ #
+
+function main() {
+    parse_arguments "$@"
+    info "Setting up production server: $(get_production_machine)"
+    info "Using deployment root: $(get_remote_deploy_root)"
+    check_ssh_connection
+    setup_local_bin_path
+    install_pipx_remote
+    install_poetry_remote
+    install_delta_remote
+    install_fzf_remote
+    install_tree_remote
+    install_lnav_remote
+    install_gdb_remote
+    install_zsh_remote
+    setup_zsh_environment
+    setup_directory_structure
+    deploy_trading_utils
+    build_and_deploy_packages
+    info "Setup completed successfully"
+}
+
+main "$@"

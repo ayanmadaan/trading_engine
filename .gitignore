@@ -1,0 +1,8 @@
+build/
+CMakeFiles/
+CMakeCache.txt
+log/
+.vscode/
+infra_config*
+var/
+TradingSystem

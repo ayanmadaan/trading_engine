@@ -1,0 +1,141 @@
+# NOTE: This config file is specifically designed for trading BTC perpetual
+# contracts. The config file is designed to trade on Bybit and OKX exchanges.
+
+# global configuration for the strategy
+trading_control:
+  trading_enabled: false # FIXME
+  live_trading_enabled: false
+  strategy_ready_timeout_seconds: 30 # 30 seconds
+
+# list of orders to be placed
+orders:
+  - price_offset: 5.08e-4
+    quantity: 1e-3 # 0.001 BTC (100 USD if BTC price = 100,000)
+
+# risk controls for quote orders
+quote_safety_control:
+  price_distance_control:
+    minimum_distance: 4.08e-4 # the closest permissible distance (ref_touch - quote) / quote * -1(ask)/+1(bid)
+
+# risk controls for hedging orders
+hedge_safety_control:
+  max_spread: 0.05e-4
+
+# quote reference pricing configuration
+quoting_reference_price:
+  source: "binance_perp_btc_usdt"
+  constant_shift: 3e-4 # okx on average is 3 bps higher than bybit and binance
+  position_shift: 0.05 # 20e-4 / 0.04
+
+# maximum position
+bybit_position:
+  max_position: 0.04
+  base_position: 0 # NOTE: not yet implemented and must set to 0
+okx_position:
+  max_position: 0.04
+  base_position: 0 # NOTE: not yet implemented and must set to 0
+
+# trading markets configuration
+markets:
+  quote:
+    name: "bybit_perp_btc_usdt"
+    tick_sizes:
+      price: 0.1
+      quantity: 0.001
+    number_of_orders_to_track: 30
+    exchange_keys: # Testnet
+      api_key: "WFwjEDObszHoKQ7hnK"
+      api_secret: "3JBPBLhJOyj5CQJPSNV8a1ionHJP3lUk0UNk"
+    # exchange_keys: # Mainnet
+    #   api_key: "ua578KdlI4VAoJct09"
+    #   api_secret: "MKeceZmxwlXKKa6CnBZDRtfgBd3vklXlIApJ"
+  hedge:
+    name: "okx_perp_btc_usdt"
+    tick_sizes:
+      price: 0.1
+      quantity: 0.0001
+    number_of_orders_to_track: 30
+    exchange_keys: # Testnet
+      api_key: "b37447d6-59ee-477d-9383-4c330a974942"
+      api_secret: "92C2924C99B3E3BF27375E2B189987CD"
+      api_passphrase: "Jack-mm-testnet-1"
+    # exchange_keys: # Mainnet
+    #   api_key: "ef4e385e-5d2d-46e1-a0b6-e4a328c41f90"
+    #   api_secret: "6472DE3AA85F69A93CB45E30D153BB29"
+    #   api_passphrase: "Jackmm#1"
+
+# order placement policy
+order_placement_policy:
+  order_type: "post_only" # post_only/limit/ioc
+  size_round_mode: "floor" # floor/ceil/nearest
+  price_round_mode: "away" # inner/away/nearest
+  offset_base: "mid" # mid/touch
+
+  # NOTE: Always enable shift_to_postable for post_only orders.
+  # NOTE: When both enabled, shift_to_postable takes precedence.
+  # NOTE: When both enabled and positive ticks_from_touch: shift_to_postable has no effect as prices are already away from opposite price
+  # NOTE: When both enabled and zero ticks_from_touch: shift_to_postable enforces 1 tick minimum
+  # NOTE: When both enabled and negative ticks_from_touch: shift_to_postable overrides by enforcing 1 tick minimum
+  shift_to_touch:
+    enabled: true
+    ticks_from_touch: 0 # applies only to orders inner than market price. >0: away from market. =0: at market. <0: inner than market (more positive means more conservative)
+  shift_to_postable:
+    enabled: true
+    ticks_from_postable: 0 # applies only to orders at or cross opposite price. 0: shift to 1 tick inner than, 1: shift to 2 inner than opposite price (more positive means more postable)
+
+# NOTE: The current strategy implements rate limit control only on the quoting side.
+# rate limiting and cooldown settings
+rate_limits:
+  send:
+    time_window_sec: 1 # 1 second
+    max_actions: 150 # 150 submissions per second
+    cooldown_sec: 1 # 1 second
+  cancel:
+    time_window_sec: 1 # 1 second
+    max_actions: 150 # 150 cancellations per second
+    cooldown_sec: 1 # 1 second
+  modify:
+    time_window_sec: 1 # 1 second
+    max_actions: 150 # 150 modifications per second
+    cooldown_sec: 1 # 1 second
+
+# trading stop loss settings
+stop_loss:
+  loss_threshold: -10 # -100 USD
+
+exchange_stability:
+  websocket_heartbeat_ms: 10e3 # 10 seconds
+  stale_threshold_ns: 400e6 # 400ms
+  ws_reconnection_retry_limit: 10
+  cooldown_on_instability_sec: 10 # 10 second
+
+pending_tolerances:
+  submission_sec: 1.0 # 1 second
+  cancellation_sec: 1.0 # 1 second
+  modification_sec: 1.0 # 1 second
+
+bybit_recon:
+  tolerable_threshold: 1e-3 # 1e-3 BTC
+  max_mismatch_cnt: 3
+  max_failure_query_cnt: 3
+  normal_recon_interval_ms: 60e3 # 1 minute
+  retry_interval_on_failure_ms: 20e3 # 20 seconds
+  retry_interval_on_mismatch_ms: 20e3 # 20 seconds
+
+okx_recon:
+  tolerable_threshold: 1e-3 # 1e-3 BTC
+  max_mismatch_cnt: 3
+  max_failure_query_cnt: 3
+  retry_interval_on_failure_ms: 60e3 # 1 minute
+  normal_recon_interval_ms: 20e3 # 20 seconds
+  retry_interval_on_mismatch_ms: 20e3 # 20 seconds
+
+pnl_recon:
+  max_failure_query_cnt: 3
+  normal_recon_interval_ms: 60e3 # 1 minute
+  failure_recon_interval_ms: 20e3 # 20 seconds
+
+# trading status logging configuration
+trading_status_logger:
+  status_dir: "/home/jack/jackmm/var/status/" # must be a directory
+  interval_ms: 1000 # 1 second
